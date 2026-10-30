@@ -77,7 +77,31 @@
 
 ## 7. Opus 独立评审
 
-（本地 Opus 评审进行中，结论出来后合并到这里。）
+> 评审时间：2026-10-29；本地 Opus（CLI，只读静态分析：只读指定文件片段，未改动仓库、未运行构建）。
+> 完整版见本仓库 [docs/CODE_REVIEW_OPUS.md](docs/CODE_REVIEW_OPUS.md)。核心结论摘要如下：
+
+### 高危
+1. **审批门太松**：`ApprovalPolicy.decide` 的第一条就是"只有花钱才问用户"（`Approval.kt:48-52`）——发消息、删除、发帖、改账号/安全设置、往密码框里打字、读不出目标的点击，全部直接执行。它还在用户看不见的后台屏上操作，模型一旦认错联系人或误读界面，不可逆的错误会在无人看管的情况下成批发生；"是不是花钱"本身也靠屏上有没有币种金额这类启发式规则判断。
+2. **自主模式下安全网失效**：`ConfirmDecision.judge` 里 `autonomous` 的提前返回排在 `ownApp` 检查之前——"不操作 Mika 自己界面"这层保护失效，连付款也不拦；`reviewFinalAnswer=false`，最终核查关闭、回答一律记"未核实"（roadmap「已知问题」1，作者承认但明确暂不修）。
+3. **调试面开得太大**：`WebView.setWebContentsDebuggingEnabled(true)` 无条件开启（`WebDevtools.kt:288`）；默认自动打开无线调试、无障碍替开，声明 `WRITE_SECURE_SETTINGS`（Manifest:24-26）——只要能 adb 连上这台手机，就能拿到内置浏览器里所有已登录站点的会话。
+
+### 中危
+4. **ReadScript 只读脚本已知绕过点未修**（roadmap 3）：CSS 转义和 `:is()` 里拼出来的选择器能绕过 `[value` 拦截；秘密输入框的 `valueAsNumber`、`selectionStart` 等属性能间接读出内容；`fetch` 的请求头全部放行。
+
+### 低危
+5. **最终回答无核实且回放不生效**：`reviewFinalAnswer=false` 导致学习和回放不会生效（已知问题 1 的一部分，实战影响相对间接，列低危）。
+
+### 建议（Opus 认为值得保留的巧妙设计）
+- **单一执行入口编译期保证**：`ToolDispatcher.execute` 要求 `ActionPass` 参数，其构造函数 `internal`，只有 `ActionExecutor` 能造出来——绕过审批在编译时就过不了；动作一旦开始放进 `NonCancellable` 做完，取消也不会掐在半中间。
+- **不 root 拿 shell，交接四重校验**：作者自实现 ADB 协议，经无线调试拉起 uid 2000 助手进程；交接时依次核对调用方是否为 shell、uid/pid 与 Binder 是否一致、APK 是否当前这份、32 字节一次性口令（`HelperHandoff.kt:72-81`）。
+- **插话不打乱缓存与节奏**：插话只撤掉正在等的模型请求，历史只往后追加（提示词缓存照样用）；被打断的等待时间下次动作前补足，插话不会让下一次对外动作来得更快。
+
+### 最值得优先修的 5 个问题
+1. 收紧 `ApprovalPolicy`（成本最低、收益最大）：把 `ActionRisk.Irreversible/External`（发送、删除、改安全设置、密码框输入）改成 `Ask`；无人在场的定时任务一律 `Deny`；成批对外动作开工前先确认名单和数量。
+2. 修 `ConfirmDecision.judge` 的顺序：把 `ownApp` 检查挪到 `autonomous` 提前返回之前，恢复"不操作自己界面"的保护。
+3. 至少对做过对外动作的运行打开 `reviewFinalAnswer`（`RunEvent.Approval` 里已记"做过对外的事"，正好拿来判断）。
+4. 调试面默认收紧："自动打开无线调试"和"重启后自动恢复"改默认关、由用户主动开启。
+5. 补 ReadScript 绕过（roadmap 3）：选择器先解析再判断、秘密输入框只放行白名单属性、`fetch` 请求头白名单。
 
 ---
 
