@@ -29,7 +29,7 @@ jobs:
 
       - name: Install Android platform 36 + build-tools
         run: |
-          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
 
       - name: Make gradlew executable
         run: chmod +x gradlew
