@@ -1,5 +1,5 @@
 # Mika fork 自动编译：每次 push / PR / 手动触发都打出 debug APK
-# 说明见仓库 docs/ci-build.md
+# ubuntu-latest 自带 Android SDK（$ANDROID_SDK_ROOT），无需 setup-android
 name: Build APK
 
 on:
@@ -8,6 +8,10 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
 jobs:
   build:
@@ -23,8 +27,9 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android platform 36 + build-tools
+        run: |
+          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
 
       - name: Make gradlew executable
         run: chmod +x gradlew
