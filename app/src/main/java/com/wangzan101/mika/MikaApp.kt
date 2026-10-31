@@ -242,6 +242,9 @@ class MikaApp : Application(), WebOwner, SandboxOwner, TaskEnvironment.Owner, Ph
         AppLanguage.applyDefaultLocale(this)
         UiText.source = ResourceTexts { AppLanguage.resources(this) }
         registerActivityLifecycleCallbacks(foreground)
+        // 首次启动预置测试用的模型服务商和 Key(见 DefaultProvider),装上就能用
+        runCatching { com.wangzan101.mika.settings.DefaultProvider.seed(providers, java.io.File(filesDir, "settings")) }
+            .onFailure { Log.w("MikaApp", "default provider seed failed", it) }
         capsule.start()
         // 内置助手的真实现,并开始看着助手(Mika 进程起来后,还活着的助手会自己交接 Binder)
         phone.shellManager.start()
