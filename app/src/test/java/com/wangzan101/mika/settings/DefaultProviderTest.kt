@@ -23,7 +23,7 @@ class DefaultProviderTest {
         assertEquals(DefaultProvider.BASE_URL, p.baseUrl)
         assertEquals(DefaultProvider.API_KEY, s.providerKey(p.id))
         assertEquals(DefaultProvider.MAIN_MODEL, s.configFor(ModelRole.Main)?.model)
-        assertEquals(RoleChoice.SameAsMain, s.roles.value.vision)
+        assertEquals(DefaultProvider.VISION_MODEL, s.configFor(ModelRole.Vision)?.model)
         assertTrue(p.models.orEmpty().size > 1)
         // 用户删掉后不会再回来
         s.removeProvider(p.id)
