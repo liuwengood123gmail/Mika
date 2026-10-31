@@ -1,5 +1,6 @@
 package com.wangzan101.mika.ui
 
+import com.wangzan101.mika.ChineseUi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
@@ -12,6 +13,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import android.content.ClipboardManager
 import com.wangzan101.mika.about.CheckStatus
 import com.wangzan101.mika.about.MikaLinks
 import com.wangzan101.mika.about.ReleaseInfo
@@ -29,6 +32,8 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AboutScreenTest {
+    @get:Rule(order = Int.MIN_VALUE) val chinese = ChineseUi()
+
     @get:Rule val compose = createComposeRule()
 
     private val r020 = ReleaseInfo(
@@ -41,7 +46,10 @@ class AboutScreenTest {
         var checks = 0
         var saves = 0
         var licenses = 0
+        var asks = 0
     }
+
+    private val sampleDiagnostics = "Mika 诊断信息 / Mika diagnostics\n\n[App]\nversion: 0.1.0 (build abc1234)\n"
 
     private fun about(update: UpdateState = UpdateState()): Calls {
         val calls = Calls()
@@ -50,7 +58,8 @@ class AboutScreenTest {
                 AboutScreen(
                     versionName = "0.1.0", build = "abc1234", beta = true, update = update, issueUrl = "issue://prefilled",
                     onCheck = { calls.checks++ }, onOpenUrl = { calls.urls += it },
-                    onSaveQr = { calls.saves++; true }, onOpenLicense = { calls.licenses++ }, onBack = {},
+                    onSaveQr = { calls.saves++; true }, onAskMikaToJoin = { calls.asks++ }, onOpenLicense = { calls.licenses++ }, onBack = {},
+                    diagnostics = { sampleDiagnostics },
                 )
             }
         }
@@ -96,16 +105,37 @@ class AboutScreenTest {
     }
 
     @Test
-    fun feedbackSheetHasThreeOptions() {
+    fun feedbackSheetHasFourOptions() {
         val calls = about()
         compose.onNodeWithText("反馈问题").performClick()
         compose.awaitOne(AboutCopy.FEEDBACK_SHEET_SUB)
-        compose.onAllNodesWithTag("feedback-option").assertCountEquals(3)
+        compose.onAllNodesWithTag("feedback-option").assertCountEquals(4)
+        compose.onNodeWithText("复制诊断信息").assertIsDisplayed()
         compose.onNodeWithText(AboutCopy.FEEDBACK_WECHAT).assertIsDisplayed()
         compose.onNodeWithText(AboutCopy.FEEDBACK_X).assertIsDisplayed()
         compose.onNodeWithText(AboutCopy.FEEDBACK_GITHUB).performClick()
         compose.waitForIdle()
         assertEquals(listOf("issue://prefilled"), calls.urls)
+    }
+
+    /** 「复制诊断信息」先打开预览:整段文字看得见,点「复制」才进剪贴板。 */
+    @Test
+    fun feedbackDiagnosticsPreviewsThenCopies() {
+        about()
+        compose.onNodeWithText("反馈问题").performClick()
+        compose.awaitOne("复制诊断信息").performClick()
+        compose.awaitOne("不包含 API Key、聊天内容和屏幕内容")
+        compose.waitUntil(5_000) { compose.onAllNodesWithText(sampleDiagnostics).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("diagnostics-text").assertIsDisplayed()
+        compose.onNodeWithTag("diagnostics-share").assertExists()
+        compose.onNodeWithTag("diagnostics-copy").performClick()
+        compose.waitForIdle()
+        var clip: String? = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val cm = InstrumentationRegistry.getInstrumentation().targetContext.getSystemService(ClipboardManager::class.java)
+            clip = cm.primaryClip?.getItemAt(0)?.text?.toString()
+        }
+        assertEquals(sampleDiagnostics, clip)
     }
 
     @Test
@@ -128,13 +158,27 @@ class AboutScreenTest {
         compose.onNodeWithText(AboutCopy.GROUP_HINT).assertExists()
     }
 
+    /** 二维码下面:已经加过作者微信的,点一下让 Mika 去发消息;连点只算一次。 */
+    @Test
+    fun groupSheetAsksMikaOnce() {
+        val calls = about()
+        compose.onNodeWithText("加入内测群").performClick()
+        compose.awaitOne(AboutCopy.GROUP_SHEET_SUB)
+        compose.onNodeWithText(AboutCopy.SAVE_QR).assertExists()
+        compose.onNodeWithText(AboutCopy.GROUP_ALREADY_ADDED).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("group-ask-mika").performScrollTo().assertIsDisplayed().performClick()
+        compose.waitForIdle()
+        assertEquals(1, calls.asks)
+        compose.onAllNodesWithTag("group-ask-mika").assertCountEquals(0)
+    }
+
     @Test
     fun checkRowStartsCheckWhenNoUpdate() {
         val calls = about(UpdateState(latest = r020.copy(version = "0.1.0")))
         compose.onNodeWithText(AboutCopy.UP_TO_DATE).assertIsDisplayed()
         compose.onNodeWithText("检查更新").performClick()
         assertEquals(1, calls.checks)
-        compose.onAllNodesWithTag("update-dot").assertCountEquals(0)
+        compose.onAllNodesWithTag("update-dot", useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
@@ -153,7 +197,7 @@ class AboutScreenTest {
     fun updateRowOpensUpdateSheet() {
         val calls = about(UpdateState(latest = r020, update = r020, status = CheckStatus.Done))
         compose.onNodeWithText("0.2.0 可更新").assertIsDisplayed()
-        compose.onNodeWithTag("update-dot").assertExists()
+        compose.onNodeWithTag("update-dot", useUnmergedTree = true).assertExists()
         compose.onNodeWithText("检查更新").performClick()
         compose.awaitOne("发现新版本 0.2.0")
         compose.onNodeWithText("当前 0.1.0 Beta · 2026-11-05 发布").assertExists()
@@ -201,11 +245,12 @@ class AboutScreenTest {
         }
         compose.onNodeWithText("设置").assertIsDisplayed()
         compose.onNodeWithText("关于 Mika").assertIsDisplayed()
-        compose.onNodeWithTag("update-dot").assertExists()
+        compose.onNodeWithTag("update-dot", useUnmergedTree = true).assertExists()
         val footer = compose.onNodeWithTag("drawer-footer").getUnclippedBoundsInRoot()
-        val settings = compose.onNodeWithText("设置").getUnclippedBoundsInRoot()
-        val about = compose.onNodeWithText("关于 Mika").getUnclippedBoundsInRoot()
-        val dot = compose.onNodeWithTag("update-dot").getUnclippedBoundsInRoot()
+        // 量文字本身(未合并的树):合并后的可点行节点比文字宽,量它判断不了左右半边
+        val settings = compose.onNodeWithText("设置", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val about = compose.onNodeWithText("关于 Mika", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val dot = compose.onNodeWithTag("update-dot", useUnmergedTree = true).getUnclippedBoundsInRoot()
         val mid = (footer.left + footer.right) / 2
         assertTrue(settings.right < mid)
         assertTrue(about.left > mid)
@@ -227,7 +272,7 @@ class AboutScreenTest {
             }
         }
         compose.onNodeWithText("关于 Mika").assertIsDisplayed()
-        compose.onAllNodesWithTag("update-dot").assertCountEquals(0)
+        compose.onAllNodesWithTag("update-dot", useUnmergedTree = true).assertCountEquals(0)
     }
 
     /** 设置首页「关于 Mika」一行:有新版写「x 可更新」带红点。 */
@@ -244,6 +289,6 @@ class AboutScreenTest {
         }
         scrollTo("0.2.0 可更新")
         compose.onNodeWithText("0.2.0 可更新").assertIsDisplayed()
-        compose.onNodeWithTag("update-dot").assertExists()
+        compose.onNodeWithTag("update-dot", useUnmergedTree = true).assertExists()
     }
 }

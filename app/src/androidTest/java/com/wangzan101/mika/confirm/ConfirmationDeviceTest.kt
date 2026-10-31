@@ -1,5 +1,7 @@
 package com.wangzan101.mika.confirm
 
+import org.junit.Rule
+import com.wangzan101.mika.ChineseUi
 import com.wangzan101.mika.DeviceTaskState
 import android.app.Notification
 import android.app.NotificationManager
@@ -35,9 +37,12 @@ import com.wangzan101.mika.task.TaskEnvironment
  */
 @RunWith(AndroidJUnit4::class)
 class ConfirmationDeviceTest {
+    @get:Rule(order = Int.MIN_VALUE) val chinese = ChineseUi()
+
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
     private lateinit var shell: IMikaShell
-    private val model = ScriptedModel()
+    // 界面发起的任务在第一个工具调用前另问一次意图(没配轻量模型时问的就是这个模型):固定答 ACT,不占脚本
+    private val model = ScriptedModel().apply { intent = "ACT" }
     private var appTask = -1
 
     @Before
@@ -45,9 +50,9 @@ class ConfirmationDeviceTest {
         shell = DeviceSupport.shell()
         DeviceSupport.service()
         sh("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
-        testTasks.modelFactory = { model }
-        testTasks.lightModelFactory = { null }
-        testTasks.visionModelFactory = { null }
+        testTasks.modelFactory = { _, _ -> model }
+        testTasks.lightModelFactory = { _, _ -> null }
+        testTasks.visionModelFactory = { _, _ -> null }
     }
 
     @After
@@ -79,7 +84,7 @@ class ConfirmationDeviceTest {
         TaskService.start(context, "测试确认关卡")
         assertEquals(1, model.awaitCall().number)
         model.feed("phone_launch_app", """{"package":"$SETTINGS"}""")
-        model.awaitCall()
+        assertEquals(2, model.awaitCall().number)
         appTask = shell.topTaskId(testTasks.agentDisplayId.value)
         model.feed("request_confirmation", """{"action":"order","target":"测试项","content":"买测试项\n第二行","amount":"¥25","app":"$SETTINGS"}""")
         awaitState { it is TaskState.WaitingConfirmation }
@@ -142,7 +147,7 @@ class ConfirmationDeviceTest {
         TaskService.start(context, "测试确认关卡")
         assertEquals(1, model.awaitCall().number)
         model.feed("phone_launch_app", """{"package":"$SETTINGS"}""")
-        model.awaitCall()
+        assertEquals(2, model.awaitCall().number)
         appTask = shell.topTaskId(testTasks.agentDisplayId.value)
         model.feed("request_confirmation", """{"action":"send","target":"测试","content":"转账","amount":"¥25","app":"$SETTINGS"}""")
         val result = lastToolResult(model.awaitCall())

@@ -1,5 +1,6 @@
 package com.wangzan101.mika.ui
 
+import com.wangzan101.mika.i18n.ChineseTexts
 import com.wangzan101.mika.task.TaskGate
 
 import com.wangzan101.mika.chat.ConversationStore
@@ -35,6 +36,8 @@ import org.junit.rules.TemporaryFolder
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
+    @get:Rule val texts = ChineseTexts()
+
     @get:Rule val tmp = TemporaryFolder()
 
     private val state = MutableStateFlow<TaskState>(TaskState.Idle)
@@ -744,6 +747,97 @@ class ChatViewModelTest {
     private fun TestScope.show(conversationId: String, s: TaskState) {
         shown.value = conversationId to s
         runCurrent()
+    }
+
+    /** 删掉屏上这个对话:当场换成新的空对话,侧栏不再列它,删的事交给后台。 */
+    @Test fun deletingTheOpenConversationShowsAFreshOne() = runTest {
+        val store = ConversationStore(tmp.newFolder())
+        store.append("a", Turn("查天气", "晴", "succeeded"))
+        store.append("b", Turn("订票", "好了", "succeeded"))
+        val removed = mutableListOf<String>()
+        val vm = ChatViewModel(backgroundScope, state, stage, actions, store, removeConversation = { removed += it; store.delete(it) }).also { runCurrent() }
+        vm.openConversation("a")
+        assertEquals(1, vm.ui.value.exchanges.size)
+
+        vm.deleteConversation("a")
+        runCurrent()
+        assertEquals(listOf("a"), removed)
+        assertEquals(setOf("a"), vm.deleted.value)
+        assertNull(vm.ui.value.conversationId)
+        assertTrue(vm.ui.value.exchanges.isEmpty())
+        assertEquals(ComposerMode.Idle, vm.ui.value.composer)
+
+        // 删别的对话:屏上的不动
+        vm.openConversation("b")
+        vm.deleteConversation("x")
+        runCurrent()
+        assertEquals("b", vm.ui.value.conversationId)
+        assertEquals(listOf("订票"), vm.ui.value.exchanges.map { it.goal })
+    }
+
+    /** 侧栏里改名、置顶:存下来,侧栏按存下的重排(置顶的在「置顶」一段,最近置顶的在前);删掉的对话不再改。 */
+    @Test fun renameAndPinReorderTheDrawer() = runTest {
+        val store = ConversationStore(tmp.newFolder())
+        store.append("a", Turn("查天气", "晴", "succeeded"))
+        store.append("b", Turn("订票", "好了", "succeeded"))
+        store.append("c", Turn("写周报", "好了", "succeeded"))
+        var now = 1_000L
+        val vm = ChatViewModel(backgroundScope, state, stage, actions, store, clock = { now }, removeConversation = { store.delete(it) }).also { runCurrent() }
+        fun sections() = drawerSections(store.list(), CurrentConversation(null, false, "", ""), emptyList(), vm::runningGoal, vm.canSwitch(), 0L)
+
+        vm.renameConversation("b", " 回家的票 ")
+        vm.setPinned("c", true)
+        now = 2_000L
+        vm.setPinned("b", true)
+        val s = sections()
+        assertEquals(listOf("回家的票", "写周报"), s.pinned.map { it.title })
+        assertEquals(listOf("a"), s.recent.map { it.id })
+
+        vm.setPinned("b", false)
+        assertEquals(listOf("c"), sections().pinned.map { it.id })
+        assertEquals(setOf("a", "b"), sections().recent.mapNotNull { it.id }.toSet())
+
+        vm.deleteConversation("c")
+        runCurrent()
+        vm.renameConversation("c", "不该写进去")
+        vm.setPinned("c", true)
+        assertNull(store.title("c"))
+        assertNull(store.pinnedAt("c"))
+    }
+
+    /** 删掉的对话又有人往里存了(悬浮胶囊接着在那个编号里说):侧栏重新列出它。 */
+    @Test fun aDeletedConversationThatIsWrittenAgainIsListedAgain() = runTest {
+        val store = ConversationStore(tmp.newFolder())
+        store.append("a", Turn("查天气", "晴", "succeeded"))
+        val vm = ChatViewModel(backgroundScope, state, stage, actions, store, removeConversation = { store.delete(it) }).also { runCurrent() }
+        vm.deleteConversation("a")
+        runCurrent()
+        assertEquals(setOf("a"), vm.deleted.value)
+        store.append("a", Turn("再来", "好", "succeeded"))
+        runCurrent()
+        assertTrue(vm.deleted.value.isEmpty())
+    }
+
+    /** 并行时删掉正在跑任务的屏上对话:不再跟那个任务,它之后的状态也不接到新对话里。 */
+    @Test fun deletingARunningOpenConversationStopsFollowingIt() = runTest {
+        val store = ConversationStore(tmp.newFolder())
+        val vm = parallelVm(store)
+        vm.switchTo("a")
+        assertTrue(vm.send("设置版本号", ok))
+        active.value = listOf("a")
+        show("a", TaskState.Running(1, "打开设置"))
+        assertEquals(ComposerMode.Busy, vm.ui.value.composer)
+
+        vm.deleteConversation("a")
+        runCurrent()
+        val fresh = vm.ui.value.conversationId
+        assertTrue(fresh != null && fresh != "a")
+        assertEquals(ComposerMode.Idle, vm.ui.value.composer)
+        assertFalse(vm.ui.value.pip.visible)
+        show("a", TaskState.Running(2, "看屏幕"))
+        show("a", TaskState.Cancelled)
+        assertTrue(vm.ui.value.exchanges.isEmpty())
+        assertEquals(fresh, vm.ui.value.conversationId)
     }
 
     @Test fun otherRunningExcludesCurrent() = runTest {

@@ -1,5 +1,6 @@
 package com.wangzan101.mika.ui
 
+import com.wangzan101.mika.i18n.AppLanguage
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import com.wangzan101.mika.ui.components.KeyboardDismissArea
@@ -42,6 +43,8 @@ import com.wangzan101.mika.cap.web.WebSites
 import com.wangzan101.mika.browser.UserBrowser
 import com.wangzan101.mika.BuildConfig
 import com.wangzan101.mika.MikaApp
+import com.wangzan101.mika.about.Diagnostics
+import com.wangzan101.mika.about.DiagnosticsCollector
 import com.wangzan101.mika.about.MikaLinks
 import com.wangzan101.mika.about.QrImage
 import com.wangzan101.mika.chat.ConversationStore
@@ -53,6 +56,7 @@ import com.wangzan101.mika.settings.ProviderStore
 import com.wangzan101.mika.settings.SystemStatusMonitor
 import com.wangzan101.mika.cap.phone.PhoneServices
 import com.wangzan101.mika.cap.phone.setup.DeveloperSettings
+import com.wangzan101.mika.cap.phone.setup.PairingNotifier
 import com.wangzan101.mika.core.shell.BuiltinShellStatus
 import com.wangzan101.mika.ui.theme.MikaTheme
 import com.wangzan101.mika.ui.theme.animationsOff
@@ -65,6 +69,11 @@ class MainActivity : ComponentActivity() {
         // 用户选过「不再询问」时系统不再弹窗,只能去设置里打开
         if (!granted && !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) openNotificationSettings()
         monitor.refresh()
+    }
+
+    // 安卓 12 及以前套上 App 里选的语言;13 起系统自己套
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLanguage.wrap(newBase))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,7 +101,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         monitor.start()
-        // 每天最多悄悄查一次新版本,失败不吭声
+        // 每次打开都悄悄查一次新版本(两分钟内连着打开的只查一次),失败不吭声
         (application as MikaApp).updates.autoCheckInBackground()
     }
 
@@ -120,6 +129,7 @@ class MainActivity : ComponentActivity() {
             Fix.OpenAttentionChannel -> openChannelSettings(TaskService.CHANNEL_ATTENTION)
             Fix.OpenResultChannel -> openChannelSettings(TaskService.CHANNEL_RESULT)
             Fix.OpenProgressChannel -> openChannelSettings(TaskService.CHANNEL_PROGRESS)
+            Fix.OpenPairingChannel -> openChannelSettings(PairingNotifier.ensureChannel(this).id)
             Fix.AddModel -> Unit // 设置页自己处理
             // 换页由 MikaRoot 处理
             Fix.OpenPhoneSetup, Fix.RepairPhoneHelper -> Unit
@@ -172,7 +182,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** 用系统浏览器打开外部链接(GitHub、X 等);没有浏览器时提示一句。 */
-private fun openInBrowser(context: Context, url: String) {
+internal fun openInBrowser(context: Context, url: String) {
     try {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
     } catch (e: ActivityNotFoundException) {
@@ -349,8 +359,24 @@ private fun MikaRoot(store: ProviderStore, monitor: SystemStatusMonitor, activit
             onCheck = app.updates::checkInBackground,
             onOpenUrl = { openInBrowser(context, it) },
             onSaveQr = { QrImage.saveToPictures(context) },
+            onAskMikaToJoin = {
+                // 和悬浮胶囊开始任务一样:新对话里交给服务(别的任务在跑时排上),再回到对话页看它跑
+                val gap = AboutCopy.groupTaskGap(check)
+                if (gap != null) {
+                    Toast.makeText(context, gap.message, Toast.LENGTH_SHORT).show()
+                    gap.fix?.let(onFix) ?: nav.push(Route.Settings)
+                } else {
+                    val id = ConversationStore.shared(context).newConversation()
+                    TaskService.start(context, MikaLinks.GROUP_TASK, id, queue = true)
+                    app.chat.openConversation(id)
+                    nav.reset()
+                }
+            },
             onOpenLicense = { nav.push(Route.License) },
             onBack = back,
+            diagnostics = {
+                Diagnostics.render(DiagnosticsCollector.collect(context, status))
+            },
         )
         Route.License -> LicensesScreen(onBack = back)
         Route.Browser -> BrowserScreen(remember { UserBrowser.of(context) }, onBack = back)

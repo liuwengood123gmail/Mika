@@ -1,8 +1,12 @@
 package com.wangzan101.mika
 
+import com.wangzan101.mika.i18n.ResourceTexts
+import com.wangzan101.mika.i18n.UiText
+import com.wangzan101.mika.i18n.AppLanguage
 import android.app.Application
 import android.net.Uri
 import android.util.Log
+import com.wangzan101.mika.chat.ConversationDeleter
 import com.wangzan101.mika.chat.ConversationStore
 import com.wangzan101.mika.core.cap.sandbox.SandboxStatus
 import com.wangzan101.mika.cap.sandbox.AndroidSandbox
@@ -47,6 +51,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.wangzan101.mika.cap.web.cdp.WebDevtools
 import com.wangzan101.mika.cap.web.WebOwner
 import com.wangzan101.mika.cap.web.SiteRegistry
@@ -85,7 +90,7 @@ class MikaApp : Application(), WebOwner, SandboxOwner, TaskEnvironment.Owner, Ph
     val usage: UsageLedger by lazy { UsageLedger(java.io.File(filesDir, "usage-v1.json")) }
 
     /** 模型配置与 Key;建出的模型都套上计量,记到 [usage]。 */
-    override val providers: ProviderStore by lazy { ProviderStore.create(this, usage) }
+    override val providers: ProviderStore by lazy { ProviderStore.create(this, usage, "Mika/${BuildConfig.VERSION_NAME}") }
 
     /** 经验路线。 */
     override val routes: FileRouteStore by lazy { FileRouteStore.create(this) }
@@ -124,6 +129,22 @@ class MikaApp : Application(), WebOwner, SandboxOwner, TaskEnvironment.Owner, Ph
 
     /** 对话记录:整个进程一份,任务服务、聊天界面、结果卡片的按钮共用。 */
     val conversations: ConversationStore by lazy { ConversationStore(this) }
+
+    /** 删对话(侧栏长按):连带它的任务、定时任务和工作区。 */
+    val conversationDeleter: ConversationDeleter by lazy {
+        val app = this
+        ConversationDeleter(
+            conversations, taskState.activeConversations,
+            cancelTasks = { id -> taskState.runs.value.filter { it.conversationId == id }.forEach { TaskService.cancel(app, it.key) } },
+            schedulesOf = { id -> TriggerRuntime.list(app).filter { it.threadId == id }.map { it.id } },
+            removeSchedule = { TriggerRuntime.remove(app, it) },
+            deleteWorkspace = { id ->
+                // 工作区里有附件、用户发来的屏幕、任务写的文件;沙箱里的命令碰得到这里,按句柄删、不跟进链接,和重置互斥
+                val dirs = SandboxDirs(app)
+                dirs.tree.shared { withContext(Dispatchers.IO) { dirs.gate.deleteTree(dirs.work, dirs.workspace(id).name) } }
+            },
+        )
+    }
 
     /** 用户发来的屏幕(跟着各自的对话存在工作区里)。 */
     val userScreens: com.wangzan101.mika.chat.UserScreenFiles by lazy { com.wangzan101.mika.chat.UserScreenFiles(this) }
@@ -210,11 +231,16 @@ class MikaApp : Application(), WebOwner, SandboxOwner, TaskEnvironment.Owner, Ph
                 Attachments.importInto(app, uris.map(Uri::parse), dirs.workspace(id), dirs.gate, dirs.tree, sandbox::freeBytes) { sandbox.workspaceBytes(id) }
             },
             describeAttachments = { uris -> AttachFiles.describe(app, uris) },
+            deletionImpact = conversationDeleter::impact,
+            removeConversation = conversationDeleter::delete,
         )
     }
 
     override fun onCreate() {
         super.onCreate()
+        // 界面以外的文字(通知、服务、悬浮胶囊)按 App 语言取
+        AppLanguage.applyDefaultLocale(this)
+        UiText.source = ResourceTexts { AppLanguage.resources(this) }
         registerActivityLifecycleCallbacks(foreground)
         capsule.start()
         // 内置助手的真实现,并开始看着助手(Mika 进程起来后,还活着的助手会自己交接 Binder)

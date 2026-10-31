@@ -1,5 +1,6 @@
 package com.wangzan101.mika.ui
 
+import com.wangzan101.mika.ChineseUi
 import com.wangzan101.mika.DeviceTaskState
 import android.app.UiAutomation
 import kotlinx.coroutines.runBlocking
@@ -49,7 +50,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import com.wangzan101.mika.task.testTasks
 import com.wangzan101.mika.task.TaskEnvironment
 
@@ -60,6 +61,8 @@ import com.wangzan101.mika.task.TaskEnvironment
  */
 @RunWith(AndroidJUnit4::class)
 class ChatScreenDeviceTest {
+    @get:Rule(order = Int.MIN_VALUE) val chinese = ChineseUi()
+
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -73,9 +76,9 @@ class ChatScreenDeviceTest {
         DeviceSupport.shell()
         DeviceSupport.service()
         sh("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
-        testTasks.modelFactory = { model }
-        testTasks.lightModelFactory = { null }
-        testTasks.visionModelFactory = { null }
+        testTasks.modelFactory = { _, _ -> model }
+        testTasks.lightModelFactory = { _, _ -> null }
+        testTasks.visionModelFactory = { _, _ -> null }
         File(context.getExternalFilesDir(null), "shots").mkdirs()
         // 界面状态是整个进程共用的:等上一个测试的任务全部收尾,再换成新对话,免得接上它的结束状态
         DeviceTaskState.runs.value.forEach { it.cancel() }
@@ -260,11 +263,14 @@ class ChatScreenDeviceTest {
         val prior = flags.speedFlags()
         flags.setSpeed(prior.copy(parallelTasks = true))
         val models = listOf(ScriptedModel().apply { intent = "ACT" }, ScriptedModel().apply { intent = "ACT" })
-        val handed = AtomicInteger()
-        testTasks.modelFactory = { models[handed.getAndIncrement().coerceAtMost(1)] }
+        // 模型工厂不只任务开工时取:新对话起标题也在后台另取一次,先后不定。按次数轮换会让第一个任务拿到第二个模型;
+        // 改成第一个任务真的问过模型之前都给第一个,之后都给第二个(起标题的那一问哪个模型都固定回答)
+        val firstStarted = AtomicBoolean(false)
+        testTasks.modelFactory = { _, _ -> if (firstStarted.get()) models[1] else models[0] }
         try {
             compose.runOnUiThread { assertTrue(vm.send("第一个任务", anyway)) }
             assertEquals(1, models[0].awaitCall().number)
+            firstStarted.set(true)
             val first = vm.ui.value.conversationId
             compose.runOnUiThread {
                 vm.newConversation()

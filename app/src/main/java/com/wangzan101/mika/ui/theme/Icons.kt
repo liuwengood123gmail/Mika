@@ -30,6 +30,8 @@ object MikaIcons {
     val Menu = stroke("menu", "M4 7 h16 M4 12 h16 M4 17 h10")
     /** 新对话:一支笔。 */
     val New = stroke("new", "M12 20 h8", "M16.5 3.5 a2.1 2.1 0 0 1 3 3 L7 19 l-4 1 l1 -4 z")
+    /** 改名:一支斜放的笔,笔头后面一道箍(和「新对话」不同,下面不带横线)。 */
+    val Edit = stroke("edit", "M16.5 3.5 a2.1 2.1 0 0 1 3 3 L7 19 l-4 1 l1 -4 z", "M14.5 5.5 l4 4")
     val Back = stroke("back", "M15 5 l-7 7 l7 7")
     val Forward = stroke("forward", "M9 5 l7 7 l-7 7")
     val Chevron = stroke("chevron", "M9 6 l6 6 l-6 6", width = 2f)
@@ -165,6 +167,8 @@ object MikaIcons {
     val Copy = stroke(
         "copy", "M10 8 h7 a2 2 0 0 1 2 2 v7 a2 2 0 0 1 -2 2 h-7 a2 2 0 0 1 -2 -2 v-7 a2 2 0 0 1 2 -2 z", "M5 15 V6 a1 1 0 0 1 1 -1 h9",
     )
+    /** 图钉:置顶了的对话。 */
+    val Pin = stroke("pin", "M9 3.5 h6 M10 3.5 v5.5 l-3 3.5 h10 l-3 -3.5 V3.5", "M12 12.5 V20.5")
     /** 星:常用网站。 */
     val Star = stroke("star", "M12 4.5 l2.3 4.7 l5.2 0.8 l-3.8 3.6 l0.9 5.1 L12 16.3 l-4.6 2.4 l0.9 -5.1 L4.5 10 l5.2 -0.8 z")
     /** 显示器:电脑版网页。 */

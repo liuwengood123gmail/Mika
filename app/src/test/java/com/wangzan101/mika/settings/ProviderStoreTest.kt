@@ -4,8 +4,11 @@ import com.wangzan101.mika.core.model.Capabilities
 import com.wangzan101.mika.core.model.ChatModel
 import com.wangzan101.mika.core.model.ListedModel
 import com.wangzan101.mika.core.model.Message
+import com.wangzan101.mika.core.model.ModelEndpoint
+import com.wangzan101.mika.core.model.ModelProtocol
 import com.wangzan101.mika.core.model.ModelReply
 import com.wangzan101.mika.core.model.ModelRole
+import com.wangzan101.mika.core.model.ModelSession
 import com.wangzan101.mika.core.model.StopReason
 import com.wangzan101.mika.core.model.ToolSpec
 import com.wangzan101.mika.core.model.Usage
@@ -28,9 +31,14 @@ class ProviderStoreTest {
 
     private val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
     private val built = mutableListOf<Pair<ProviderConfig, String?>>()
+    private val endpoints = mutableListOf<ModelEndpoint?>()
 
-    private fun store() = ProviderStore(tmp.root, AesGcmKeyCipher { key }) { cfg, apiKey ->
+    private val setups = mutableListOf<ClientSetup>()
+
+    private fun store() = ProviderStore(tmp.root, AesGcmKeyCipher { key }, userAgent = "Mika/1.2.3") { cfg, apiKey, endpoint, setup ->
         built += cfg to apiKey
+        setups += setup
+        endpoints += endpoint
         FakeModel(cfg.capabilities)
     }
 
@@ -223,6 +231,21 @@ class ProviderStoreTest {
         store().saveAsMain(cfg("a"), "sk-a")
         val otherKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
         assertNull(ProviderStore(tmp.root, AesGcmKeyCipher { otherKey }).apiKey("a"))
+    }
+
+    /** 试调用通过的模型名随服务商存下;再连一次同一家时合并;旧文件没有这一项时为空。 */
+    @Test
+    fun verifiedModelsPersist() {
+        val s = store()
+        val p = s.connect("X", ProviderConfig.Kind.OpenAiCompat, "https://x.test/v1", "k", emptyList(), verified = setOf("a"))
+        assertEquals(setOf("a"), p.verifiedModels)
+        s.markVerified(p.id, "b")
+        s.connect("X", ProviderConfig.Kind.OpenAiCompat, "https://x.test/v1", null, emptyList(), verified = setOf("c"))
+        assertEquals(setOf("a", "b", "c"), store().provider(p.id)?.verifiedModels)
+        val f = File(tmp.root, "providers.json")
+        f.writeText(f.readText().replace(Regex(",\"verifiedModels\":\\[[^\\]]*\\]"), ""))
+        assertFalse(f.readText().contains("verifiedModels"))
+        assertEquals(emptySet<String>(), store().provider(p.id)?.verifiedModels)
     }
 
     @Test
@@ -455,12 +478,201 @@ class ProviderStoreTest {
         assertEquals(RoleChoices(main = null, vision = RoleChoice.SameAsMain, light = RoleChoice.SameAsMain), r.keepOnly(emptySet()))
     }
 
+    // ---------- 按模型指定的接口 ----------
+
+    private val chat = ModelEndpoint(ModelProtocol.ChatCompletions, "https://x.test/openai/v1", "reasoning_content")
+    private val messages = ModelEndpoint(ModelProtocol.Messages, "https://x.test/anthropic/v1")
+    private val generate = ModelEndpoint(ModelProtocol.GenerateContent, "https://x.test/google/v1beta")
+    private val responses = ModelEndpoint(ModelProtocol.Responses, "https://x.test/openai/v1/")
+
+    @Test
+    fun perModelEndpointsPersistWithTheList() {
+        val s = store()
+        val listed = listOf(
+            ListedModel("a", endpoint = chat), ListedModel("b", endpoint = messages), ListedModel("c", endpoint = generate),
+            ListedModel("r", endpoint = responses), ListedModel("u", unsupportedApis = listOf("realtime")), ListedModel("plain"),
+        )
+        s.connect("X", ProviderConfig.Kind.OpenAiCompat, "https://x.test/v1", "k", listed)
+        assertEquals(listed, store().providers.value.single().models)
+    }
+
+    @Test
+    fun eachModelIsBuiltWithTheEndpointItsListingNamed() = runTest {
+        val s = store()
+        val p = s.connect(
+            "X", ProviderConfig.Kind.OpenAiCompat, "https://x.test/v1", "k",
+            listOf(ListedModel("a", endpoint = chat), ListedModel("b", endpoint = messages), ListedModel("plain")),
+        )
+        s.use(ModelRole.Main, p.id, "b", none)
+        s.use(ModelRole.Light, p.id, "plain", none)
+        store().modelFor(ModelRole.Main)
+        store().modelFor(ModelRole.Light)
+        assertEquals(listOf(messages, null), endpoints)
+        assertEquals(listOf("k", "k"), built.map { it.second })
+        // 重新列出、地址换了,下次建模型用新的
+        val moved = messages.copy(baseUrl = "https://y.test/anthropic/v1")
+        s.rememberModels(p.id, listOf(ListedModel("b", endpoint = moved)))
+        s.modelFor(ModelRole.Main)
+        assertEquals(moved, endpoints.last())
+    }
+
+    @Test
+    fun adapterAndBaseUrlFollowTheProtocolWithoutRepeatingTheVersionPath() {
+        val c = cfg("1")
+        assertEquals(ProviderConfig.Kind.OpenAiCompat to "https://example.test/v1", ProviderStore.adapterFor(c, null))
+        assertEquals(ProviderConfig.Kind.OpenAiCompat to "https://x.test/openai/v1", ProviderStore.adapterFor(c, chat))
+        assertEquals(ProviderConfig.Kind.Anthropic to "https://x.test/anthropic", ProviderStore.adapterFor(c, messages))
+        assertEquals(ProviderConfig.Kind.Gemini to "https://x.test/google", ProviderStore.adapterFor(c, generate))
+        assertEquals(ProviderConfig.Kind.OpenAiResponses to "https://x.test/openai/v1", ProviderStore.adapterFor(c, responses))
+        val anthropicConfig = c.copy(kind = ProviderConfig.Kind.Anthropic, baseUrl = "https://api.anthropic.com")
+        assertEquals(ProviderConfig.Kind.Anthropic to "https://api.anthropic.com", ProviderStore.adapterFor(anthropicConfig, null))
+    }
+
+    // ---------- 请求头 ----------
+
+    /** 声明了会话头的服务商:同一段对话建的模型带同一个会话号,换一段对话就换;User-Agent 每个都带。 */
+    @Test
+    fun sessionHeaderIsStableWithinAConversationAndDiffersAcross() {
+        val s = store()
+        val p = s.connect("Go", ProviderConfig.Kind.OpenAiCompat, "https://go.test/v1", "k", listOf(ListedModel("m1")), sessionHeader = "x-test-session")
+        s.use(ModelRole.Main, p.id, "m1", none)
+        val a = ModelSession.of("conv-a")
+        s.modelFor(ModelRole.Main, a); s.modelFor(ModelRole.Light, a); s.modelFor(ModelRole.Main, ModelSession.of("conv-b"))
+        val sent = setups.map { it.headers["x-test-session"] }
+        assertEquals(listOf(a.id, a.id, ModelSession.of("conv-b").id), sent)
+        assertTrue(sent[0] != sent[2])
+        assertTrue(setups.all { it.headers["User-Agent"] == "Mika/1.2.3" })
+    }
+
+    /** 列表把模型指到 Responses 的(同一服务商下只说这一种协议的模型):走真的 Responses 适配器,照样带客户端标识和会话号。 */
+    @Test
+    fun responsesRoutedModelCarriesTheSessionHeader() = runTest {
+        val server = okhttp3.mockwebserver.MockWebServer().also { it.start() }
+        try {
+            val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, userAgent = "Mika/1.2.3")
+            val responsesBase = server.url("/v1").toString()
+            val listed = ListedModel("r-only", endpoint = ModelEndpoint(ModelProtocol.Responses, responsesBase))
+            val p = s.connect("Go", ProviderConfig.Kind.OpenAiCompat, "https://go.test/v1", "k", listOf(listed), sessionHeader = "x-test-session")
+            s.use(ModelRole.Main, p.id, "r-only", none)
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
+            val session = ModelSession.of("conv-a")
+            s.modelFor(ModelRole.Main, session)!!.complete("s", emptyList(), emptyList())
+            val req = server.takeRequest()
+            assertEquals("/v1/responses", req.path)
+            assertEquals("Mika/1.2.3", req.getHeader("User-Agent"))
+            assertEquals(session.id, req.getHeader("x-test-session"))
+            assertEquals("Bearer k", req.getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun noSessionHeaderForProvidersThatDoNotDeclareIt() {
+        val s = store()
+        val p = connected(s)
+        s.use(ModelRole.Main, p.id, "m1", none)
+        s.modelFor(ModelRole.Main, ModelSession.of("conv-a"))
+        assertEquals(mapOf("User-Agent" to "Mika/1.2.3"), setups.single().headers)
+    }
+
+    /** 会话头随服务商存下;旧版本存下的(没有这一项)按地址对得上的预设补上,预设的地址就会带。 */
+    @Test
+    fun sessionHeaderPersistsAndIsFilledFromThePresetForOldFiles() {
+        val goUrl = ProviderPresets.all.first { it.sessionHeader != null }
+        val s = store()
+        val p = s.connect(goUrl.label, goUrl.kind, goUrl.baseUrl, "k", emptyList())
+        assertEquals(goUrl.sessionHeader, p.sessionHeader)
+        assertEquals(goUrl.sessionHeader, store().provider(p.id)?.sessionHeader)
+        val f = File(tmp.root, "providers.json")
+        f.writeText(f.readText().replace(",\"sessionHeader\":\"${goUrl.sessionHeader}\"", ""))
+        assertFalse(f.readText().contains("sessionHeader"))
+        assertEquals(goUrl.sessionHeader, store().provider(p.id)?.sessionHeader)
+        assertTrue("written back", f.readText().contains("sessionHeader"))
+    }
+
+    /** 试调用走真的适配器:带客户端标识和声明的会话头、带一个试用的工具;回了工具调用才算通过,服务端的报错原样带回。 */
+    @Test
+    fun probeGoesThroughTheRealAdapterWithHeaders() = runTest {
+        val server = okhttp3.mockwebserver.MockWebServer().also { it.start() }
+        try {
+            val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, userAgent = "Mika/1.2.3")
+            val url = server.url("/v1").toString()
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json").setBody(
+                """{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function",""" +
+                    """"function":{"name":"get_time","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+            ))
+            assertEquals(ProbeResult.ToolCalled, s.probe(ProviderConfig.Kind.OpenAiCompat, url, "sk", "x-test-session", "m", null, none))
+            val req = server.takeRequest()
+            assertEquals("/v1/chat/completions", req.path)
+            assertEquals("Mika/1.2.3", req.getHeader("User-Agent"))
+            assertTrue(req.getHeader("x-test-session").orEmpty().isNotEmpty())
+            assertEquals("Bearer sk", req.getHeader("Authorization"))
+            val body = req.body.readUtf8()
+            assertTrue(body, body.contains("\"tools\"") && body.contains("get_time"))
+            assertFalse("Chat Completions 不给回复上限", body.contains("max_tokens"))
+
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(400).setBody("""{"error":{"type":"MissingSessionID"}}"""))
+            val e = s.probe(ProviderConfig.Kind.OpenAiCompat, url, "sk", null, "m", null, none) as ProbeResult.Failed
+            assertTrue(e.error.message.orEmpty(), e.error.message.orEmpty().contains("MissingSessionID"))
+            assertNull(server.takeRequest().getHeader("x-test-session"))
+
+            // Responses 不给回复上限;回了函数调用就算通过
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"get_time\",\"arguments\":\"{}\"}}\n\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            ))
+            assertEquals(ProbeResult.ToolCalled, s.probe(ProviderConfig.Kind.OpenAiResponses, url, "sk", null, "m", null, none))
+            val responses = server.takeRequest()
+            assertEquals("/v1/responses", responses.path)
+            assertEquals("Mika/1.2.3", responses.getHeader("User-Agent"))
+            val responsesBody = responses.body.readUtf8()
+            assertFalse(responsesBody.contains("max_output_tokens"))
+            assertTrue(responsesBody.contains("get_time"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /** 接口通、模型只回了话不调用工具:不是失败,但要分得出来。 */
+    @Test
+    fun probeThatGetsOnlyTextReportsNoToolCall() = runTest {
+        val server = okhttp3.mockwebserver.MockWebServer().also { it.start() }
+        try {
+            val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, userAgent = "Mika/1.2.3")
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json")
+                .setBody("""{"choices":[{"message":{"role":"assistant","content":"It is noon."},"finish_reason":"stop"}]}"""))
+            assertEquals(ProbeResult.NoToolCall, s.probe(ProviderConfig.Kind.OpenAiCompat, server.url("/v1").toString(), "sk", null, "m", null, none))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /** 试调用给 Messages 的回复上限留得够一次工具调用(16 个 token 装不下)。 */
+    @Test
+    fun probeLeavesRoomForAToolCall() = runTest {
+        val server = okhttp3.mockwebserver.MockWebServer().also { it.start() }
+        try {
+            val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, userAgent = "Mika/1.2.3")
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json").setBody(
+                """{"content":[{"type":"tool_use","id":"t1","name":"get_time","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}""",
+            ))
+            assertEquals(ProbeResult.ToolCalled, s.probe(ProviderConfig.Kind.Anthropic, server.url("/").toString(), "sk", null, "m", null, none))
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body, body.contains("\"max_tokens\":1024"))
+            assertTrue(body.contains("get_time"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
     // ---------- 用量 ----------
 
     @Test
     fun everyModelHandedOutIsMeteredUnderTheRoleItWasAskedFor() = runTest {
         val seen = mutableListOf<Pair<UsageSource, Usage?>>()
-        val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, usage = { src, u -> seen += src to u }) { cfg, _ -> FakeModel(cfg.capabilities) }
+        val s = ProviderStore(tmp.root, AesGcmKeyCipher { key }, usage = { src, u -> seen += src to u }) { cfg, _, _, _ -> FakeModel(cfg.capabilities) }
         val p = connected(s, name = "甲")
         s.use(ModelRole.Main, p.id, "m1", none)
         s.choose(ModelRole.Vision, RoleChoice.SameAsMain)

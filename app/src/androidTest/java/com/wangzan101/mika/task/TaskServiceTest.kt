@@ -1,5 +1,7 @@
 package com.wangzan101.mika.task
 
+import org.junit.Rule
+import com.wangzan101.mika.ChineseUi
 import com.wangzan101.mika.DeviceTaskState
 import android.content.Context
 import android.view.Display
@@ -36,6 +38,8 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class TaskServiceTest {
+    @get:Rule(order = Int.MIN_VALUE) val chinese = ChineseUi()
+
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
     private lateinit var shell: IMikaShell
     /**
@@ -61,9 +65,9 @@ class TaskServiceTest {
         DeviceSupport.service()
         sh("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
         priorAudio = shell.getAudioMode(SETTINGS)!!
-        testTasks.modelFactory = { models[handed.getAndIncrement().coerceAtMost(MAX_TASKS - 1)] }
-        testTasks.lightModelFactory = { null }
-        testTasks.visionModelFactory = { null }
+        testTasks.modelFactory = { _, _ -> models[handed.getAndIncrement().coerceAtMost(MAX_TASKS - 1)] }
+        testTasks.lightModelFactory = { _, _ -> null }
+        testTasks.visionModelFactory = { _, _ -> null }
     }
 
     @After
@@ -112,7 +116,7 @@ class TaskServiceTest {
     @Test
     fun verifierUsesLightModel() {
         val lightChecks = AtomicInteger()
-        testTasks.lightModelFactory = {
+        testTasks.lightModelFactory = { _, _ ->
             object : ChatModel {
                 override val capabilities = Capabilities(toolCalls = false, vision = false, contextTokens = 8_000, reasoning = false)
                 override suspend fun complete(system: String, messages: List<Message>, tools: List<ToolSpec>): ModelReply {
@@ -241,7 +245,7 @@ class TaskServiceTest {
     fun stopLeavesASummaryAsTheAnswer() {
         val asked = AtomicInteger()
         val gate = java.util.concurrent.CountDownLatch(1)
-        testTasks.lightModelFactory = {
+        testTasks.lightModelFactory = { _, _ ->
             object : ChatModel {
                 override val capabilities = Capabilities(toolCalls = false, vision = false, contextTokens = 8_000, reasoning = false)
                 override suspend fun complete(system: String, messages: List<Message>, tools: List<ToolSpec>): ModelReply {
@@ -275,7 +279,7 @@ class TaskServiceTest {
         pollUntil(10_000) { DeviceTaskState.busy.value.takeIf { !it } }
 
         // 轻量模型出错、主模型交白卷:按记录直接拼
-        testTasks.lightModelFactory = {
+        testTasks.lightModelFactory = { _, _ ->
             object : ChatModel {
                 override val capabilities = Capabilities(toolCalls = false, vision = false, contextTokens = 8_000, reasoning = false)
                 override suspend fun complete(system: String, messages: List<Message>, tools: List<ToolSpec>): ModelReply =

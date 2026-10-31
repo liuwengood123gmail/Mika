@@ -1,10 +1,14 @@
 package com.wangzan101.mika.task
 
-import com.wangzan101.mika.core.cap.web.IdleScroll
+import com.wangzan101.mika.R
+import com.wangzan101.mika.i18n.tr
+import com.wangzan101.mika.i18n.trPlural
+import com.wangzan101.mika.core.uistate.IdleScroll
 import com.wangzan101.mika.core.cap.web.PagePacing
-import com.wangzan101.mika.core.cap.web.SitePace
+import com.wangzan101.mika.core.uistate.PlacePace
 import kotlin.random.Random
 import com.wangzan101.mika.core.action.OutwardPacing
+import com.wangzan101.mika.core.cap.phone.OperatingPace
 import com.wangzan101.mika.core.usage.RunUsageTally
 import com.wangzan101.mika.core.shell.AccessibilityRepair
 import com.wangzan101.mika.ui.StatusCopy
@@ -40,6 +44,7 @@ import com.wangzan101.mika.core.memory.MemoryExtractor
 import com.wangzan101.mika.core.memory.MemoryStore
 import com.wangzan101.mika.core.memory.UserUtterances
 import com.wangzan101.mika.core.model.ChatModel
+import com.wangzan101.mika.core.model.ModelSession
 import com.wangzan101.mika.core.skills.SkillDrafter
 import com.wangzan101.mika.chat.ConversationStore
 import com.wangzan101.mika.memory.MemoryRuntime
@@ -147,6 +152,8 @@ class TaskRun(
     /** 自己的一份;显示中时同步写到服务对外的那份。[show] 时整份抄过去。 */
     /** App 给的模型来源、评测钩子、屏幕画面的开关。 */
     private val env = TaskEnvironment.of(service)
+    /** 这段对话对外的会话号:这次运行建的模型(主、轻量、看图,及核查、意图判断、停止交代等旁路)都用它。 */
+    private val session = ModelSession.of(conversationId)
     /** App 给的手机服务(共用的 shell 连接、「去设置」提示)、记忆、经验路线、异常退出后的恢复。 */
     private val phoneServices = PhoneServices.of(service)
     private val memoryRuntime = MemoryRuntime.of(service)
@@ -348,7 +355,7 @@ class TaskRun(
     }
 
     /** 超出并行上限在排队;放出来开跑时 [dequeue]。 */
-    fun queue(position: Int) { setState(TaskState.Held(TaskGate.paused("排队中:前面还有 $position 个任务"))) }
+    fun queue(position: Int) { setState(TaskState.Held(TaskGate.paused(trPlural(R.plurals.queue_ahead, position)))) }
     fun dequeue() { setState(TaskState.Running(0, TaskService.PREPARING)) }
 
     /** 本任务的沙箱:一个任务一份(导出额度按任务算),工作区是本对话的。 */
@@ -393,9 +400,9 @@ class TaskRun(
         )
         sideScope = side
         try {
-            val model = env.modelFactory(service) ?: return TaskState.Failed("还没有能用的主模型:请在设置里添加一个支持工具调用的模型。", FailKind.Environment)
-            val light = env.lightModelFactory(service)
-            val vision = env.visionModelFactory(service)
+            val model = env.modelFactory(service, session) ?: return TaskState.Failed(tr(R.string.fail_no_main_model), FailKind.Environment)
+            val light = env.lightModelFactory(service, session)
+            val vision = env.visionModelFactory(service, session)
 
             val (knowledge, skills) = withContext(Dispatchers.IO) {
                 // 用户对某个 App/站点的补充放在私有目录 personal/apps、personal/sites 下
@@ -405,6 +412,8 @@ class TaskRun(
                 KnowledgeStore(KnowledgeStore.loadBundled(), userNotes, learnedNotes) to GuideCatalog.loadBundled()
             }
             val metrics = mainScreenMetrics()
+            // 在 App 里操作的节奏(设置 › 干活时);评测、真机验收按钩子覆盖
+            val pace = env.evalHooks.operatingPace ?: FeatureFlags.get(service).operatingPace()
             // 助手是否连着;没接上手机之前当作连着(网页、沙箱的步骤不看它)
             val shellUp = MutableStateFlow(true)
             val states = DeviceStateWatcher(service) { id -> phone?.shell?.topTaskId(id) ?: -1 }.also { watcher = it }
@@ -452,6 +461,8 @@ class TaskRun(
                     reserve = { pkg -> service.reservePackage(pkg, key) { runCatching { shell.displayOfPackage(pkg) }.getOrDefault(-1) >= 0 } },
                     clipSaved = { original, ours -> recovery.saveClip(original, ours) },
                     handedOver = { handoverRef?.handedOver == true },
+                    // 打字一段一段出来;App 知识说限制浏览快慢的 App 打得更慢
+                    typing = { pkg -> pace.typing(PlacePace.of(pkg?.let(skills::appPace))) },
                 )
                 val audio = recovery.audioMute(shell, key).also { mute = it }
                 val side0 = PhoneSide(shell, a11y, screen, agentDisplay, audio)
@@ -531,7 +542,7 @@ class TaskRun(
                 }
                 stack.screen
             }
-            if (conditionCheck && !webInstalled) return TaskState.Failed("设备没有可用的网页能力，条件检查无法运行", FailKind.Environment)
+            if (conditionCheck && !webInstalled) return TaskState.Failed(tr(R.string.fail_no_web), FailKind.Environment)
             // 这个对话里用户发来的屏幕(跟着对话存在工作区里)
             val userScreens = (service.application as MikaApp).userScreens.source(conversationId)
             val runSpec = RunSpec(RunId(key), goal, conversationId,
@@ -541,8 +552,10 @@ class TaskRun(
             val childRunner = if (provenance.origin == RunOrigin.Ui && web != null) ChildAgentRunner(
                 create = { childSpec ->
                     val childTools = toolDispatcher(phoneScreen, model.capabilities.vision,
-                        web = web, webPacing = { PagePacing.human() }, webSitePace = { SitePace.of(catalog.sitePace(it)) },
-                        webIdleScroll = { IdleScroll(Random.Default) }, sandbox = sandbox, workspace = { conversationId }, runSpec = childSpec,
+                        web = web, webPacing = { PagePacing.human() }, webPlacePace = { PlacePace.of(catalog.sitePace(it)) },
+                        webIdleScroll = { IdleScroll(Random.Default) },
+                        appPacing = { pace.appPacing() }, appPace = { PlacePace.of(catalog.appPace(it)) }, appIdleScroll = { IdleScroll(Random.Default) },
+                        sandbox = sandbox, workspace = { conversationId }, runSpec = childSpec,
                         conversationId = conversationId, inlineScreen = speed.inlineScreen,
                         adaptiveVision = speed.adaptiveVision)
                     AgentLoop(model, childTools, SystemPrompt.identity(), maxSteps = childSpec.stepBudget ?: AgentLoop.UNLIMITED_STEPS,
@@ -563,6 +576,9 @@ class TaskRun(
                 webPacing = { PagePacing.human() },
                 // 停留时像人一样把页面轻轻滚几下
                 webIdleScroll = { IdleScroll(Random.Default) },
+                // 在 App 里一步一步操作:动作之间停一会儿,限制浏览快慢的 App 停得更久、屏数有上限(按设置里的操作节奏)
+                appPacing = { pace.appPacing() },
+                appIdleScroll = { IdleScroll(Random.Default) },
                 // 上传只认本对话工作区里的普通文件(与沙箱同一套路径规则);技能目录、工作区外一律越界
                 workspacePath = web?.let { { p: String -> sandbox.uploadCheck(conversationId, p) } },
                 // 工作区 = 对话:同一对话的追问接着用上一轮的文件,不同对话互不可见
@@ -826,7 +842,7 @@ class TaskRun(
         if (!StopSummary.worthSaying(events, draft)) return null
         // 还没开出模型就停下的(准备阶段):按设置现取
         val (main, light) = if (k != null) k.model to k.light else withContext(Dispatchers.IO) {
-            runCatching { env.modelFactory(service) }.getOrNull() to runCatching { env.lightModelFactory(service) }.getOrNull()
+            runCatching { env.modelFactory(service, session) }.getOrNull() to runCatching { env.lightModelFactory(service, session) }.getOrNull()
         }
         val labels = ToolLabels(knownTools())
         return StopSummary(light ?: main, main).summarize(k?.agent?.taskText ?: goal, events, draft, labels::label) {
@@ -941,9 +957,9 @@ class TaskRun(
         val w = state as? TaskState.WaitingTakeover ?: return null
         return listOfNotNull(
             w.message.takeIf { it.isNotBlank() },
-            w.item?.let { "商品:$it" },
-            w.amount?.let { "金额:$it" },
-            w.address?.let { "地址:$it" },
+            w.item?.let { tr(R.string.payment_item, it) },
+            w.amount?.let { tr(R.string.payment_amount, it) },
+            w.address?.let { tr(R.string.payment_address, it) },
         ).joinToString("\n").ifEmpty { null }
     }
 
@@ -952,10 +968,10 @@ class TaskRun(
         const val WEB_FRAME_MS = 500L
         const val SHELL_WAIT_MS = 15_000L
         const val DISPLAY_RETRY_MS = 1_000L
-        const val WAITING_DISPLAY = "排队中:等另一个任务做完再开始"
+        val WAITING_DISPLAY: String get() = tr(R.string.task_waiting_display)
         const val A11Y_WAIT_MS = 5_000L
-        const val NO_PHONE_HELPER = "手机操作还没准备好:请在 Mika 里完成「设置手机操作」(打开无线调试并配对一次)。网页和文件类的事不受影响。"
-        const val NO_ACCESSIBILITY = "Mika 的无障碍服务没有开启:请在系统设置的无障碍里打开 Mika。"
+        val NO_PHONE_HELPER: String get() = tr(R.string.task_no_phone_helper)
+        val NO_ACCESSIBILITY: String get() = tr(R.string.task_no_a11y)
         const val TAG = "MikaTask"
     }
 }

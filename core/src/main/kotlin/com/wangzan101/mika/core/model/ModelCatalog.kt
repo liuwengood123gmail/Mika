@@ -15,6 +15,11 @@ import okhttp3.Request
 
 /**
  * 服务商列出的一个模型。能力字段为 null 表示接口没给,由调用方沿用自己的初值,这里不猜。
+ *
+ * 有的服务商一个 Key 下的模型走不同的接口协议,列表里给每个模型写明协议和地址(`api` 表)。
+ * [endpoint] 是其中 Mika 会说的那一种,调用这个模型时按它选适配器和地址;为 null 时按服务商的接口类型。
+ * [unsupportedApis] 是写明了、但 Mika 一种也不会说的协议名:这样的模型调用必然失败,不给选(见 [usable])。
+ * [chat] 是接口说没说它是对话模型(`type` 是 chat / embedding / rerank…,或输出模态里有没有文字);没说为 null。
  */
 data class ListedModel(
     val id: String,
@@ -23,7 +28,49 @@ data class ListedModel(
     val vision: Boolean? = null,
     val contextTokens: Int? = null,
     val reasoning: Boolean? = null,
-)
+    val endpoint: ModelEndpoint? = null,
+    val unsupportedApis: List<String> = emptyList(),
+    val chat: Boolean? = null,
+) {
+    val usable: Boolean get() = endpoint != null || unsupportedApis.isEmpty()
+}
+
+/** 模型列表里 `api` 表认得的接口协议;[wire] 是表里的键名。 */
+enum class ModelProtocol(val wire: String) {
+    /** OpenAI Chat Completions,由 [OpenAiCompatModel] 调用。 */
+    ChatCompletions("chat-completions"),
+    /** Anthropic Messages,由 [AnthropicModel] 调用。 */
+    Messages("messages"),
+    /** Gemini generateContent,由 [GeminiModel] 调用。 */
+    GenerateContent("generate-content"),
+    /** OpenAI Responses,由 [ResponsesModel] 调用。排在最后:同一个模型也写了前几种的,照旧用前几种。 */
+    Responses("responses");
+
+    companion object {
+        fun of(wire: String?): ModelProtocol? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/**
+ * 一个模型单独指定的接口:协议、列表里给的地址([baseUrl],是这个协议的根,如 `…/anthropic/v1`),
+ * 以及兼容接口把思考内容放在哪个字段([reasoningField],如 `reasoning_content`;没说为 null)。
+ */
+data class ModelEndpoint(val protocol: ModelProtocol, val baseUrl: String, val reasoningField: String? = null) {
+    /**
+     * 交给适配器的 Base URL。适配器自己接版本路径:[AnthropicModel] 接 `/v1/messages`、[GeminiModel] 接
+     * `/v1beta/models/…`,所以列表地址末尾已带的这一段去掉,免得重复;Chat Completions 只接 `/chat/completions`、
+     * Responses 只接 `/responses`,原样用。
+     */
+    val adapterBaseUrl: String
+        get() {
+            val url = baseUrl.trim().trimEnd('/')
+            return when (protocol) {
+                ModelProtocol.ChatCompletions, ModelProtocol.Responses -> url
+                ModelProtocol.Messages -> url.removeSuffix("/v1")
+                ModelProtocol.GenerateContent -> url.removeSuffix("/v1beta")
+            }
+        }
+}
 
 /** 列模型为什么失败;[text] 是给人看的原因。 */
 enum class ListFailure(val text: String) {
@@ -48,31 +95,36 @@ sealed interface ModelListResult {
  * 用各家公开的「列出模型」接口取可用模型:
  * - OpenAI 兼容:`GET {base}/models`(Bearer)。只给 id 的照实返回;带 `context_length`、
  *   `architecture.input_modalities`、`supported_parameters` 等字段的(部分聚合服务会给)才填能力。
+ *   也认另一种写法:`capabilities.tools.supported`、`capabilities.reasoning.supported`、`limit.context`、
+ *   `modalities.input`(有 `image/…` 即能看图),以及按协议给地址的 `api` 表(见 [ListedModel.endpoint])。
+ *   用 ChatGPT 账号列出的是 `models` 表:名字在 `slug`、显示名在 `display_name`,只留 `visibility` 为 `list` 的、保持服务端的次序;
+ *   给了 `input_modalities`、`context_window`、`supported_reasoning_levels` 的照填。
  * - Anthropic:`GET {base}/v1/models`,按 `after_id` 翻页;`max_input_tokens` 是上下文,
  *   `capabilities.image_input` / `capabilities.thinking` 是看图和推理。不给工具调用信息。
  * - Gemini:`GET {base}/v1beta/models`,按 `pageToken` 翻页;只留能 `generateContent` 的,
  *   `inputTokenLimit` 是上下文,`thinking` 是推理。不给工具调用和看图信息。
  */
 class ModelCatalog(private val http: OkHttpClient) {
+    // 各方法的 headers:每个请求都带的头(见 [ClientHeaders]);Key 的头由这里自己加
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun openAiCompat(baseUrl: String, apiKey: String?): ModelListResult = run {
+    suspend fun openAiCompat(baseUrl: String, apiKey: String?, headers: Map<String, String> = emptyMap()): ModelListResult = run {
         val url = endpoint(baseUrl, "/models") ?: return@run badUrl()
-        val req = Request.Builder().url(url).get()
+        val req = Request.Builder().url(url).get().withHeaders(headers)
             .apply { if (!apiKey.isNullOrEmpty()) header("Authorization", "Bearer $apiKey") }.build()
         val root = fetch(req).getOrElse { return@run it.asFailure() }
         val data = (root["data"] ?: root["models"]) as? JsonArray ?: return@run ModelListResult.Failed(ListFailure.BadResponse)
         ModelListResult.Ok(data.mapNotNull { (it as? JsonObject)?.let(::openAiModel) }.distinctBy { it.id })
     }
 
-    suspend fun anthropic(baseUrl: String, apiKey: String): ModelListResult = run {
+    suspend fun anthropic(baseUrl: String, apiKey: String, headers: Map<String, String> = emptyMap()): ModelListResult = run {
         val base = endpoint(baseUrl, "/v1/models") ?: return@run badUrl()
         val all = mutableListOf<ListedModel>()
         var after: String? = null
         repeat(MAX_PAGES) {
             val url = base.newBuilder().addQueryParameter("limit", "1000")
                 .apply { if (after != null) addQueryParameter("after_id", after) }.build()
-            val req = Request.Builder().url(url).get()
+            val req = Request.Builder().url(url).get().withHeaders(headers)
                 .header("x-api-key", apiKey).header("anthropic-version", "2023-06-01").build()
             val root = fetch(req).getOrElse { return@run it.asFailure() }
             val data = root["data"] as? JsonArray ?: return@run ModelListResult.Failed(ListFailure.BadResponse)
@@ -83,14 +135,14 @@ class ModelCatalog(private val http: OkHttpClient) {
         ModelListResult.Ok(all.distinctBy { it.id })
     }
 
-    suspend fun gemini(baseUrl: String, apiKey: String): ModelListResult = run {
+    suspend fun gemini(baseUrl: String, apiKey: String, headers: Map<String, String> = emptyMap()): ModelListResult = run {
         val base = endpoint(baseUrl, "/v1beta/models") ?: return@run badUrl()
         val all = mutableListOf<ListedModel>()
         var token: String? = null
         repeat(MAX_PAGES) {
             val url = base.newBuilder().addQueryParameter("pageSize", "1000")
                 .apply { if (token != null) addQueryParameter("pageToken", token) }.build()
-            val req = Request.Builder().url(url).get().header("x-goog-api-key", apiKey).build()
+            val req = Request.Builder().url(url).get().withHeaders(headers).header("x-goog-api-key", apiKey).build()
             val root = fetch(req).getOrElse { return@run it.asFailure() }
             val data = root["models"] as? JsonArray ?: JsonArray(emptyList())
             all += data.mapNotNull { (it as? JsonObject)?.let(::geminiModel) }
@@ -101,19 +153,48 @@ class ModelCatalog(private val http: OkHttpClient) {
     }
 
     private fun openAiModel(o: JsonObject): ListedModel? {
-        val id = o.str("id")?.takeIf { it.isNotBlank() } ?: return null
+        // 用 ChatGPT 账号列模型时(`models` 表)名字在 `slug`、显示名在 `display_name`,只留 `visibility` 为 list 的
+        o.str("visibility")?.let { if (it != "list") return null }
+        val id = (o.str("id") ?: o.str("slug"))?.takeIf { it.isNotBlank() } ?: return null
         val arch = o["architecture"] as? JsonObject
         val inputs = (arch?.get("input_modalities") as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
         val modality = arch?.str("modality")?.substringBefore("->")
+        val outputs = ((arch?.get("output_modalities") ?: o.obj("modalities")?.get("output")) as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?: arch?.str("modality")?.takeIf { "->" in it }?.substringAfter("->")?.split('+')
         val params = (o["supported_parameters"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
         val caps = o["capabilities"] as? JsonObject
+        val modalIn = ((o.obj("modalities")?.get("input") ?: o["input_modalities"]) as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        val reasoningLevels = o["supported_reasoning_levels"] as? JsonArray
+        val api = o.obj("api")
+        // 一个模型可能写了几种协议:按 Chat Completions、Messages、generateContent、Responses 的次序取第一种会说的
+        val endpoint = api?.let { a ->
+            ModelProtocol.entries.firstNotNullOfOrNull { p ->
+                val e = a.obj(p.wire) ?: return@firstNotNullOfOrNull null
+                val url = e.str("base_url")?.takeIf { it.isNotBlank() } ?: return@firstNotNullOfOrNull null
+                ModelEndpoint(p, url, e.obj("compatibility")?.str("reasoning_field"))
+            }
+        }
         return ListedModel(
             id = id,
-            displayName = o.str("name").orEmpty(),
-            toolCalls = params?.let { "tools" in it } ?: caps?.bool("function_calling") ?: caps?.bool("tool_calls"),
-            vision = inputs?.let { "image" in it } ?: modality?.let { "image" in it } ?: o.bool("supports_image_in") ?: caps?.bool("vision"),
-            contextTokens = o.int("context_length") ?: o.int("context_window") ?: o.int("max_context_length"),
-            reasoning = params?.let { "reasoning" in it || "include_reasoning" in it } ?: o.bool("supports_reasoning"),
+            displayName = (o.str("name") ?: o.str("display_name")).orEmpty(),
+            toolCalls = params?.let { "tools" in it } ?: caps?.obj("tools")?.bool("supported")
+                ?: caps?.bool("function_calling") ?: caps?.bool("tool_calls"),
+            vision = inputs?.let { "image" in it } ?: modalIn?.let { m -> m.any { it == "image" || it.startsWith("image/") } }
+                ?: modality?.let { "image" in it } ?: o.bool("supports_image_in") ?: caps?.bool("vision"),
+            contextTokens = o.int("context_length") ?: o.int("context_window") ?: o.int("max_context_length")
+                ?: o.obj("limit")?.int("context"),
+            reasoning = params?.let { "reasoning" in it || "include_reasoning" in it } ?: caps?.obj("reasoning")?.bool("supported")
+                ?: o.bool("supports_reasoning") ?: reasoningLevels?.let { it.isNotEmpty() },
+            endpoint = endpoint,
+            unsupportedApis = if (endpoint == null) api?.keys?.toList().orEmpty() else emptyList(),
+            chat = when (o.str("type")?.lowercase()) {
+                in CHAT_TYPES -> true
+                in NON_CHAT_TYPES -> false
+                // 只出图、出声音的不是对话模型;出文字的不另记
+                else -> outputs?.takeIf { "text" !in it }?.let { false }
+            },
         )
     }
 
@@ -176,11 +257,18 @@ class ModelCatalog(private val http: OkHttpClient) {
     private fun endpoint(baseUrl: String, path: String) = (baseUrl.trim().trimEnd('/') + path).toHttpUrlOrNull()
 
     private fun JsonObject.str(k: String): String? = (this[k] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+    private fun JsonObject.obj(k: String): JsonObject? = this[k] as? JsonObject
     private fun JsonObject.bool(k: String): Boolean? = (this[k] as? JsonPrimitive)?.booleanOrNull
     private fun JsonObject.int(k: String): Int? = (this[k] as? JsonPrimitive)?.intOrNull?.takeIf { it > 0 }
 
     private companion object {
         /** 翻页上限:防止服务端一直给下一页。 */
         const val MAX_PAGES = 10
+        /** 列表里 `type` 一项的写法:是对话模型的,和不是的(向量、重排、画图、语音、审核)。 */
+        val CHAT_TYPES = setOf("chat", "llm", "language", "text", "vlm", "code")
+        val NON_CHAT_TYPES = setOf(
+            "embedding", "embeddings", "rerank", "reranker", "image", "images", "video", "audio", "tts", "stt", "asr",
+            "speech", "transcription", "moderation",
+        )
     }
 }

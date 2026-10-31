@@ -47,11 +47,22 @@ internal object StopRules {
 internal fun userReason(e: ModelError): String = when (e) {
     is ModelError.Auth -> "模型服务拒绝了请求:API Key 无效或没有权限。请在设置里检查 API Key 是否填写正确、是否有权使用该模型。"
     is ModelError.QuotaExceeded -> "模型账户额度已用完,请检查服务商账户的余额或套餐。"
-    is ModelError.ModelNotFound -> "找不到该模型,请检查模型名称和 Base URL 是否正确。"
+    is ModelError.ModelNotFound ->
+        if (e.model.isEmpty()) "找不到该模型,请到设置 › 模型检查模型名和 Base URL 是否正确。"
+        else "模型「${e.model}」在这个服务商那里不存在。去设置 › 模型,检查模型名(要填完整的模型 ID,比如 Gemini 的模型名类似 gemini-2.5-flash)或改用对应的预设。"
+    is ModelError.ModelNotAvailable ->
+        "模型「${e.model.ifEmpty { "当前模型" }}」这个账号没开通或没权限用。去设置 › 模型换一个模型，或到服务商后台开通。"
+    is ModelError.ToolsUnsupported ->
+        "模型「${e.model.ifEmpty { "当前模型" }}」不支持调用工具,Mika 干活要靠工具。去设置 › 模型换一个会调用工具的模型。"
     is ModelError.ContextTooLong -> "对话内容超出了模型的上下文长度,请换用上下文更长的模型,或把任务拆小一些。"
     is ModelError.ContentRefused -> "模型拒绝处理该内容,请调整任务描述或换一个模型。"
     is ModelError.RateLimited -> "模型服务限流,重试后仍然请求太频繁。请稍后再试,或检查账户的调用频率限制。"
     is ModelError.Network -> "连接模型服务失败,重试后仍然不通。请检查网络和 Base URL。"
     is ModelError.Server -> "模型服务出错(HTTP ${e.status}),请稍后再试。"
     is ModelError.BadResponse -> "${e.message}。请检查 Base URL 和接口类型是否匹配。"
+    is ModelError.ChatGptLimitReached ->
+        "ChatGPT 额度用完了,稍后再试。用量可以在 ChatGPT 设置 › 用量(chatgpt.com/settings/usage)查看;Plus 每 5 小时的额度和其他用 ChatGPT 登录的 App 共用。也可以先换一个模型。"
+    is ModelError.ChatGptNotEligible ->
+        "这个账号不能在其他 App 里用 ChatGPT 额度(需要 Plus 或 Pro,并且所在地区和账号设置允许)。${if (e.detail.isEmpty()) "" else "服务端说明:${e.detail}。"}可以换一个模型。"
+    is ModelError.SignInExpired -> "ChatGPT 登录已失效,请在设置 › 模型里重新用 ChatGPT 登录。"
 }

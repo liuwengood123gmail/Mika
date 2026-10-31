@@ -1,5 +1,6 @@
 package com.wangzan101.mika.ui
 
+import androidx.compose.ui.res.stringResource
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -15,16 +16,19 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -38,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -66,12 +71,13 @@ import com.wangzan101.mika.ui.theme.MikaTheme
 import com.wangzan101.mika.ui.theme.MikaType
 
 /** 关于页上点开的底部面板。 */
-private enum class AboutSheet { Update, Changelog, Feedback, Group }
+private enum class AboutSheet { Update, Changelog, Feedback, Group, Diagnostics }
 
 /**
  * 关于 Mika:顶上图标、名字、一句话介绍、版本(Beta 标记、构建编号);下面三组——检查更新与更新记录,
  * 反馈、内测群、关注作者,开源仓库与使用说明;一段数据说明;最底下许可证与作者。
  * 外部链接都交给 [onOpenUrl](系统浏览器);手动检查的结果到了([UpdateState.manualRounds] 变了)才提示。
+ * [diagnostics] 写出诊断信息(反馈面板里「复制诊断信息」点开预览时在后台线程调)。
  */
 @Composable
 fun AboutScreen(
@@ -83,8 +89,10 @@ fun AboutScreen(
     onCheck: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onSaveQr: () -> Boolean,
+    onAskMikaToJoin: () -> Unit,
     onOpenLicense: () -> Unit,
     onBack: () -> Unit,
+    diagnostics: () -> String = { "" },
 ) {
     val c = MikaTheme.colors
     val context = LocalContext.current
@@ -147,9 +155,10 @@ fun AboutScreen(
         Column(Modifier.fillMaxWidth().padding(top = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 buildAnnotatedString {
-                    append("基于 ")
+                    val (before, after) = stringResource(R.string.about_released_under).split("%1\$s").let { it[0] to it.getOrElse(1) { "" } }
+                    append(before)
                     withStyle(SpanStyle(color = c.accent)) { append(AboutCopy.LICENSE_LINK) }
-                    append(" 发布")
+                    append(after)
                 },
                 Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onOpenLicense).padding(horizontal = 6.dp, vertical = 2.dp)
                     .testTag("about-license"),
@@ -169,9 +178,11 @@ fun AboutScreen(
             onGitHub = { close(); onOpenUrl(issueUrl) },
             onWeChat = { sheet = AboutSheet.Group },
             onX = { close(); onOpenUrl(MikaLinks.X) },
+            onDiagnostics = { sheet = AboutSheet.Diagnostics },
             onDismiss = close,
         )
-        AboutSheet.Group -> GroupSheet(onSave = saveQr, onDismiss = close)
+        AboutSheet.Diagnostics -> DiagnosticsSheet(diagnostics, onDismiss = close)
+        AboutSheet.Group -> GroupSheet(onSave = saveQr, onAskMika = { close(); onAskMikaToJoin() }, onDismiss = close)
         null -> Unit
     }
 }
@@ -232,10 +243,15 @@ private fun AboutSheetFrame(title: String, sub: String?, tag: String, onDismiss:
     val c = MikaTheme.colors
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = c.surface,
         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 16.dp, bottom = 16.dp).testTag(tag)) {
+        // 面板内容太高(矮屏、大字号)时整体能滚,底下的按钮总够得着
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding()
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp).testTag(tag),
+        ) {
             Text(title, style = MikaType.Title, color = c.ink)
             sub?.let { Text(it, Modifier.padding(top = 2.dp), style = MikaType.Caption, color = c.ink3) }
             content()
@@ -289,12 +305,13 @@ private fun ChangelogSheet(latest: ReleaseInfo?, onOpenAll: () -> Unit, onDismis
 }
 
 @Composable
-private fun FeedbackSheet(onGitHub: () -> Unit, onWeChat: () -> Unit, onX: () -> Unit, onDismiss: () -> Unit) {
+private fun FeedbackSheet(onGitHub: () -> Unit, onWeChat: () -> Unit, onX: () -> Unit, onDiagnostics: () -> Unit, onDismiss: () -> Unit) {
     AboutSheetFrame(AboutCopy.FEEDBACK, AboutCopy.FEEDBACK_SHEET_SUB, "feedback-sheet", onDismiss) {
         Column(Modifier.padding(top = 6.dp)) {
             FeedbackOption(MikaIcons.Code, AboutCopy.FEEDBACK_GITHUB, AboutCopy.FEEDBACK_GITHUB_SUB, first = true, onGitHub)
             FeedbackOption(MikaIcons.Chats, AboutCopy.FEEDBACK_WECHAT, AboutCopy.FEEDBACK_WECHAT_SUB, first = false, onWeChat)
             FeedbackOption(MikaIcons.XMark, AboutCopy.FEEDBACK_X, AboutCopy.FEEDBACK_X_SUB, first = false, onX)
+            FeedbackOption(MikaIcons.Copy, AboutCopy.DIAGNOSTICS, AboutCopy.DIAGNOSTICS_SUB, first = false, onDiagnostics)
         }
     }
 }
@@ -307,17 +324,29 @@ private fun FeedbackOption(icon: ImageVector, title: String, sub: String, first:
 }
 
 @Composable
-private fun GroupSheet(onSave: () -> Unit, onDismiss: () -> Unit) {
+private fun GroupSheet(onSave: () -> Unit, onAskMika: () -> Unit, onDismiss: () -> Unit) {
     val c = MikaTheme.colors
+    // 点一次就够:连点不会开出第二个一样的任务
+    var asked by remember { mutableStateOf(false) }
+    // 二维码最高占屏幕约三分之一,常见手机上不用滚就能看到底下的按钮
+    val qrHeight = (LocalConfiguration.current.screenHeightDp * 0.34f).coerceAtMost(280f).dp
+    val qr = painterResource(QrImage.RES)
     AboutSheetFrame(AboutCopy.GROUP_SHEET_TITLE, AboutCopy.GROUP_SHEET_SUB, "group-sheet", onDismiss) {
         Image(
-            painterResource(QrImage.RES), contentDescription = AboutCopy.GROUP_SHEET_TITLE,
-            Modifier.padding(top = 12.dp, bottom = 6.dp).align(Alignment.CenterHorizontally).width(220.dp)
+            qr, contentDescription = AboutCopy.GROUP_SHEET_TITLE,
+            Modifier.padding(top = 12.dp, bottom = 6.dp).align(Alignment.CenterHorizontally)
+                .height(qrHeight).aspectRatio(qr.intrinsicSize.width / qr.intrinsicSize.height)
                 .clip(RoundedCornerShape(12.dp))
                 .pointerInput(Unit) { detectTapGestures(onLongPress = { onSave() }) }
                 .testTag("wechat-qr"),
         )
         Text(AboutCopy.GROUP_HINT, Modifier.fillMaxWidth(), style = MikaType.Hint, color = c.ink3, textAlign = TextAlign.Center)
         MikaButton(AboutCopy.SAVE_QR, onSave, Modifier.fillMaxWidth().padding(top = 14.dp), kind = ButtonKind.Tonal)
+        HorizontalDivider(Modifier.padding(top = 16.dp), color = c.hair)
+        Text(AboutCopy.GROUP_ALREADY_ADDED, Modifier.fillMaxWidth().padding(top = 12.dp), style = MikaType.Hint, color = c.ink3, textAlign = TextAlign.Center)
+        MikaButton(
+            AboutCopy.GROUP_ASK_MIKA, { if (!asked) { asked = true; onAskMika() } },
+            Modifier.fillMaxWidth().padding(top = 8.dp).testTag("group-ask-mika"), enabled = !asked,
+        )
     }
 }

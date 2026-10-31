@@ -126,7 +126,7 @@ class GeminiModelTest {
         server.enqueue(ok(cand("""[]""")))
         model(vision = false).complete("s", msgs, emptyList())
         val p = sentBody().arr("contents")[0].jsonObject.arr("parts")[0].jsonObject
-        assertEquals("[截图已省略:当前模型不支持看图]", p.str("text"))
+        assertEquals("[screenshot omitted: the current model cannot see images]", p.str("text"))
     }
 
     @Test fun sendsJpegMime() = runTest {
@@ -155,6 +155,7 @@ class GeminiModelTest {
         assertEquals(3000L, (rl as ModelError.RateLimited).retryAfterMs)
         assertTrue(errorOf(429, err(429, "RESOURCE_EXHAUSTED", "You exceeded your current quota")) is ModelError.RateLimited)
         assertTrue(errorOf(404, err(404, "NOT_FOUND", "models/x not found")) is ModelError.ModelNotFound)
+        assertTrue(errorOf(403, err(403, "PERMISSION_DENIED", "Your project does not have access to model x")) is ModelError.ModelNotAvailable)
         assertEquals(503, (errorOf(503, err(503, "UNAVAILABLE", "busy")) as ModelError.Server).status)
     }
 
