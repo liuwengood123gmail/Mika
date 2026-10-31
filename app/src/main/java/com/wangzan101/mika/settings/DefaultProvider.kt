@@ -22,15 +22,24 @@ object DefaultProvider {
 
     private val mainCaps = Capabilities(toolCalls = true, vision = true, contextTokens = 128_000, reasoning = false)
 
-    /** 预先列出的可选模型(都实测过带工具调用);设置里还可以刷新成这个 Key 能用的全部模型。 */
+    /**
+     * 预先列出的可选模型:实测(带一个点按工具的请求)都能返回正确的工具调用,按当时的速度大致从快到慢;
+     * 看图能不能用以官网模型页写的输入类型为准,没写明的留空。列表里有但调用返回 404 的(如 nemotron-3-super-120b-a12b)没放进来。
+     * 设置里还可以刷新成这个 Key 列出的全部模型。
+     */
     private val models = listOf(
         ListedModel(MAIN_MODEL, toolCalls = true, vision = true, contextTokens = 128_000),
+        ListedModel("meta/muse-glimmer-30b", toolCalls = true, vision = true, contextTokens = 128_000),
+        ListedModel("nvidia/nemotron-3.5-bolt-e4b", toolCalls = true, vision = false, contextTokens = 128_000),
+        ListedModel("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", toolCalls = true, contextTokens = 128_000),
+        ListedModel("poolside/laguna-xs-2.1", toolCalls = true, vision = false, contextTokens = 128_000),
+        ListedModel("mistralai/mistral-large-4-1t-a52b", toolCalls = true, vision = true, contextTokens = 128_000),
+        ListedModel("nvidia/nemotron-3-ultra-550b-a55b", toolCalls = true, vision = false, contextTokens = 128_000),
+        ListedModel("openai/gpt-oss-20b", toolCalls = true, vision = false, contextTokens = 128_000),
+        ListedModel("nvidia/nemotron-3.5-lightning-30b-a3b", toolCalls = true, vision = false, contextTokens = 128_000),
+        ListedModel("stepfun-ai/step-5-preview", toolCalls = true, vision = true, contextTokens = 128_000),
         ListedModel("minimaxai/minimax-m3.1-flash", toolCalls = true, vision = true, contextTokens = 262_144),
         ListedModel("z-ai/glm-5.3-flash", toolCalls = true, vision = true, contextTokens = 128_000),
-        ListedModel("nvidia/nemotron-3.5-lightning-30b-a3b", toolCalls = true, vision = false, contextTokens = 128_000),
-        ListedModel("nvidia/nemotron-3-super-120b-a12b", toolCalls = true, vision = false, contextTokens = 128_000),
-        ListedModel("nvidia/nemotron-3.5-bolt-e4b", toolCalls = true, vision = false, contextTokens = 128_000),
-        ListedModel("openai/gpt-oss-20b", toolCalls = true, vision = false, contextTokens = 128_000),
     )
 
     /** [settingsDir] 是 [ProviderStore] 用的目录(放一个标记文件,记下已预置过)。返回是否做了预置。 */
