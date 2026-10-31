@@ -37,6 +37,7 @@ import com.wangzan101.mika.MikaApp
 import com.wangzan101.mika.core.userscreen.UserScreenMessage
 import com.wangzan101.mika.core.action.ConfirmChoice
 import com.wangzan101.mika.core.agent.AgentLoop
+import com.wangzan101.mika.core.agent.RetryPolicy
 import com.wangzan101.mika.core.agent.SystemPrompt
 import com.wangzan101.mika.core.agent.FailKind
 import com.wangzan101.mika.core.agent.ModelRouter
@@ -612,6 +613,8 @@ class TaskRun(
                     )
                 },
                 maxSteps = env.evalHooks.maxSteps ?: AgentLoop.UNLIMITED_STEPS,
+                // 免费端点(如 NVIDIA)的 429 常是瞬时过载且不带 Retry-After:多等几次、退避拉长,别几秒内撞三次就放弃
+                retry = RetryPolicy(maxRetries = 5, baseMs = 2_000, maxBackoffMs = 30_000),
                 reviewFinalAnswer = false,
                 inputTimeoutMs = TaskService.INPUT_TIMEOUT_MS,
                 // 询问 / 自主:询问时只有花钱的一步先问(有确认关卡和 request_confirmation);自主时连付款也不问。

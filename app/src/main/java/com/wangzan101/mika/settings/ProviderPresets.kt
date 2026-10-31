@@ -56,6 +56,8 @@ object ProviderPresets {
         // Key 是控制台生成的 bce-v3/… 那一串,照 Bearer 发
         ProviderPreset("百度千帆", ProviderConfig.Kind.OpenAiCompat, "https://qianfan.baidubce.com/v2", caps(), familyTokens = listOf("ernie")),
         ProviderPreset("OpenRouter", ProviderConfig.Kind.OpenAiCompat, "https://openrouter.ai/api/v1", caps()),
+        // build.nvidia.com 的免费端点(账号 Key,约 40 次请求/分钟);托管多家模型,能不能看图按模型定
+        ProviderPreset("NVIDIA", ProviderConfig.Kind.OpenAiCompat, "https://integrate.api.nvidia.com/v1", caps(context = 128_000)),
         // 订阅制,一个 Key 用多家模型;各模型走哪种协议、哪个地址由模型列表逐个写明,这里的接口类型只是没写明时的退路。
         // 每个请求都要带对话的会话号,不带就拒绝(HTTP 400)
         ProviderPreset("OpenCode Go", ProviderConfig.Kind.OpenAiCompat, "https://opencode.ai/zen/go/v1", caps(), sessionHeader = "x-opencode-session"),

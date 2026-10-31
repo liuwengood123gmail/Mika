@@ -20,7 +20,7 @@ class ProviderPresetsTest {
             listOf(
                 "DeepSeek", "通义千问", "Kimi", "智谱",
                 "硅基流动", "火山方舟", "MiniMax", "阶跃星辰", "腾讯混元", "百度千帆",
-                "OpenRouter", "OpenCode Go", "Anthropic", "Gemini",
+                "OpenRouter", "NVIDIA", "OpenCode Go", "Anthropic", "Gemini",
                 "OpenAI", "xAI", "Mistral", "Groq",
                 "Ollama", "LM Studio",
                 "自定义",
